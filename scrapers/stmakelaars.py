@@ -12,6 +12,10 @@ def parse_price(text: str) -> int:
 
 
 async def scrape_stmakelaars() -> list[dict]:
+    """
+    ST Makelaars loads listings via JS. We wait for the page to settle,
+    then dump the full page content and parse all property links.
+    """
     listings = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -20,41 +24,52 @@ async def scrape_stmakelaars() -> list[dict]:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ))
-        await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-        await page.wait_for_selector("article, .object, .woning, .property-card", timeout=15000)
+        await page.goto(BASE_URL, wait_until="networkidle", timeout=40000)
 
-        cards = await page.query_selector_all("article, .object-item")
-        for card in cards:
-            try:
-                title_el = await card.query_selector("h2, h3, .object-title, .address, [class*='title']")
-                title = (await title_el.inner_text()).strip() if title_el else ""
+        # Wait a bit extra for JS to render
+        await page.wait_for_timeout(3000)
 
-                price_el = await card.query_selector("[class*='price'], [class*='prijs'], .koopprijs")
-                price_text = (await price_el.inner_text()).strip() if price_el else ""
-                price_raw = parse_price(price_text)
-
-                link_el = await card.query_selector("a")
-                href = await link_el.get_attribute("href") if link_el else ""
-                url = href if href.startswith("http") else f"https://stmakelaars.nl{href}"
-
-                surface_el = await card.query_selector("[class*='surface'], [class*='opper'], [class*='woon']")
-                surface = (await surface_el.inner_text()).strip() if surface_el else "onbekend"
-
-                energy_el = await card.query_selector("[class*='energy'], [class*='label'], [class*='energie']")
-                energy = (await energy_el.inner_text()).strip() if energy_el else "onbekend"
-
-                if title and url:
-                    listings.append({
-                        "source": "ST Makelaars",
-                        "title": title,
-                        "price_raw": price_raw,
-                        "price": price_text or "onbekend",
-                        "surface": surface,
-                        "energy": energy,
-                        "url": url,
-                    })
-            except Exception as e:
-                log.debug(f"ST Makelaars card parse error: {e}")
-
+        content = await page.content()
         await browser.close()
+
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(content, "html.parser")
+
+    # ST Makelaars links to individual properties via /wonen/object/ or /aanbod/
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        # Property links contain /wonen/ followed by a slug (not just /wonen/aanbod)
+        if not re.search(r"/wonen/[^/]+/[^/]+", href):
+            continue
+        url = href if href.startswith("http") else f"https://stmakelaars.nl{href}"
+        if url in seen:
+            continue
+        seen.add(url)
+
+        texts = [t.strip() for t in a.stripped_strings if t.strip()]
+        if not texts:
+            continue
+
+        price_text = next((t for t in texts if "€" in t or "euro" in t.lower()), "onbekend")
+        price_raw = parse_price(price_text)
+
+        title = texts[0]
+
+        location = next(
+            (t for t in texts if re.match(r"\d{4}\s*[a-z]{2}", t, re.I)),
+            title
+        )
+
+        listings.append({
+            "source": "ST Makelaars",
+            "title": f"{title}, {location}",
+            "price_raw": price_raw,
+            "price": price_text,
+            "surface": "zie woning",
+            "energy": "zie woning",
+            "url": url,
+        })
+
+    log.info(f"ST Makelaars: scraped {len(listings)} listings")
     return listings

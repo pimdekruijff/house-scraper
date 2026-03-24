@@ -12,54 +12,72 @@ def parse_price(text: str) -> int:
 
 
 async def scrape_kolmeijer() -> list[dict]:
+    """
+    Kolmeijer returns 403 on plain requests, so we use Playwright.
+    We wait for the page to fully load and then parse all property links.
+    """
     listings = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ))
-        # Some sites block bots with headers; add extra ones
-        await page.set_extra_http_headers({
-            "Accept-Language": "nl-NL,nl;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            locale="nl-NL",
+            extra_http_headers={"Accept-Language": "nl-NL,nl;q=0.9"},
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(BASE_URL, wait_until="networkidle", timeout=40000)
+            await page.wait_for_timeout(3000)
+            content = await page.content()
+        except Exception as e:
+            log.error(f"Kolmeijer page load failed: {e}")
+            content = ""
+        finally:
+            await browser.close()
+
+    if not content:
+        return listings
+
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(content, "html.parser")
+
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        # Kolmeijer property links typically contain /aanbod/ + a slug
+        if "/aanbod/" not in href or href.rstrip("/") == BASE_URL.rstrip("/"):
+            continue
+        url = href if href.startswith("http") else f"https://www.kolmeijernijmegen.nl{href}"
+        if url in seen:
+            continue
+        seen.add(url)
+
+        texts = [t.strip() for t in a.stripped_strings if t.strip()]
+        if not texts:
+            continue
+
+        price_text = next((t for t in texts if "€" in t), "onbekend")
+        price_raw = parse_price(price_text)
+        title = texts[0]
+
+        location = next(
+            (t for t in texts if re.match(r"\d{4}\s*[a-z]{2}", t, re.I)),
+            title
+        )
+
+        listings.append({
+            "source": "Kolmeijer",
+            "title": f"{title}, {location}",
+            "price_raw": price_raw,
+            "price": price_text,
+            "surface": "zie woning",
+            "energy": "zie woning",
+            "url": url,
         })
-        await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-        await page.wait_for_selector("article, .woning, .object, .listing-item", timeout=15000)
 
-        cards = await page.query_selector_all("article, .woning-item, .listing-item")
-        for card in cards:
-            try:
-                title_el = await card.query_selector("h2, h3, .title, .adres, [class*='title'], [class*='adres']")
-                title = (await title_el.inner_text()).strip() if title_el else ""
-
-                price_el = await card.query_selector("[class*='price'], [class*='prijs'], [class*='koopsom']")
-                price_text = (await price_el.inner_text()).strip() if price_el else ""
-                price_raw = parse_price(price_text)
-
-                link_el = await card.query_selector("a")
-                href = await link_el.get_attribute("href") if link_el else ""
-                url = href if href.startswith("http") else f"https://www.kolmeijernijmegen.nl{href}"
-
-                surface_el = await card.query_selector("[class*='surface'], [class*='opper'], [class*='m2'], [class*='woon']")
-                surface = (await surface_el.inner_text()).strip() if surface_el else "onbekend"
-
-                energy_el = await card.query_selector("[class*='energy'], [class*='label'], [class*='energie']")
-                energy = (await energy_el.inner_text()).strip() if energy_el else "onbekend"
-
-                if title and url:
-                    listings.append({
-                        "source": "Kolmeijer",
-                        "title": title,
-                        "price_raw": price_raw,
-                        "price": price_text or "onbekend",
-                        "surface": surface,
-                        "energy": energy,
-                        "url": url,
-                    })
-            except Exception as e:
-                log.debug(f"Kolmeijer card parse error: {e}")
-
-        await browser.close()
+    log.info(f"Kolmeijer: scraped {len(listings)} listings")
     return listings
