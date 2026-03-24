@@ -11,6 +11,14 @@ log = logging.getLogger(__name__)
 
 PRICE_MIN = 200_000
 PRICE_MAX = 350_000
+LOCATION_KEYWORDS = ["nijmegen", "nymegen"]  # uitbreiden indien gewenst
+
+
+def is_in_nijmegen(listing: dict) -> bool:
+    title = listing.get("title", "").lower()
+    url = listing.get("url", "").lower()
+    return any(kw in title or kw in url for kw in LOCATION_KEYWORDS)
+
 
 async def run():
     log.info("Starting house scrape run...")
@@ -29,10 +37,19 @@ async def run():
             log.info(f"{scraper.__name__}: found {len(listings)} listings")
             for listing in listings:
                 price = listing.get("price_raw", 0)
-                if PRICE_MIN <= price <= PRICE_MAX:
-                    if listing["url"] not in seen:
-                        new_listings.append(listing)
-                        seen.add(listing["url"])
+                in_range = PRICE_MIN <= price <= PRICE_MAX
+                in_nijmegen = is_in_nijmegen(listing)
+                is_new = listing["url"] not in seen
+
+                log.debug(
+                    f"  {listing['title'][:50]} | "
+                    f"prijs={price} in_range={in_range} "
+                    f"nijmegen={in_nijmegen} nieuw={is_new}"
+                )
+
+                if in_range and in_nijmegen and is_new:
+                    new_listings.append(listing)
+                    seen.add(listing["url"])
         except Exception as e:
             log.error(f"{scraper.__name__} failed: {e}")
 
@@ -42,7 +59,7 @@ async def run():
             await send_telegram(listing)
         save_seen(seen)
     else:
-        log.info("No new listings found in price range.")
+        log.info("No new listings in price range in Nijmegen.")
 
 if __name__ == "__main__":
     asyncio.run(run())
