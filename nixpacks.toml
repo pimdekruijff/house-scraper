@@ -1,12 +1,5 @@
-[phases.setup]
-nixPkgs = ["chromium", "playwright-driver"]
+[build]
+cmd = "pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium"
 
-[phases.install]
-cmds = [
-  "pip install -r requirements.txt",
-  "playwright install chromium",
-  "playwright install-deps chromium"
-]
-
-[start]
-cmd = "python main.py"
+[deploy]
+startCommand = "python main.py"
