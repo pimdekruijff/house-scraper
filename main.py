@@ -8,6 +8,9 @@ from scrapers.verbeek import scrape_verbeek
 from scrapers.driessen import scrape_driessen
 from scrapers.inbeeld import scrape_inbeeld
 from scrapers.pulles import scrape_pulles
+from scrapers.homan import scrape_homan
+from scrapers.beaufort import scrape_beaufort
+from scrapers.level2 import scrape_level2
 from notifier import send_telegram
 from storage import load_seen, save_seen
 
@@ -39,6 +42,9 @@ async def run():
         scrape_driessen,
         scrape_inbeeld,
         scrape_pulles,
+        scrape_homan,
+        scrape_beaufort,
+        scrape_level2,
     ]
 
     for scraper in scrapers:
