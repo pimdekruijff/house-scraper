@@ -11,6 +11,12 @@ from scrapers.pulles import scrape_pulles
 from scrapers.homan import scrape_homan
 from scrapers.beaufort import scrape_beaufort
 from scrapers.level2 import scrape_level2
+from scrapers.hermsen import scrape_hermsen
+from scrapers.nmg import scrape_nmg
+from scrapers.robdisbergen import scrape_robdisbergen
+from scrapers.disveld import scrape_disveld
+from scrapers.rotsvast import scrape_rotsvast
+from scrapers.ooststede import scrape_ooststede
 from notifier import send_telegram
 from storage import load_seen, save_seen
 
@@ -45,6 +51,12 @@ async def run():
         scrape_homan,
         scrape_beaufort,
         scrape_level2,
+        scrape_hermsen,
+        scrape_nmg,
+        scrape_robdisbergen,
+        scrape_disveld,
+        scrape_rotsvast,
+        scrape_ooststede,
     ]
 
     for scraper in scrapers:
