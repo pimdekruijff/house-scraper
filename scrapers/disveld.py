@@ -88,10 +88,12 @@ async def fetch_detail(url: str) -> dict:
 
 async def scrape_disveld() -> list[dict]:
     """
-    Disveld listing page returned 500 on plain fetch — try Playwright first.
-    Property links likely: /aanbod/woning/straat-nr/ or similar.
+    Disveld listing page via Playwright.
+    Key fix: only scrape links found inside the main content/listing area,
+    not every /aanbod/ link on the page (which includes historical sold listings
+    linked in navigation/footer).
     """
-    property_urls = []
+    content = ""
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -106,7 +108,6 @@ async def scrape_disveld() -> list[dict]:
             content = await page.content()
         except Exception as e:
             log.error(f"Disveld listing page failed: {e}")
-            content = ""
         finally:
             await browser.close()
 
@@ -114,22 +115,42 @@ async def scrape_disveld() -> list[dict]:
         return []
 
     soup = BeautifulSoup(content, "html.parser")
+
+    # Find the main listing container — look for the area with property cards
+    # Disveld uses a grid/list of cards, typically in <main> or .listings or similar
+    # We limit to links that have price info nearby (strong signal they're active listings)
+    property_urls = []
     seen = set()
+
+    # Strategy: only pick links that have an € amount visible in the same card
     for a in soup.find_all("a", href=True):
         href = a["href"]
         full_url = href if href.startswith("http") else f"https://disveldmakelaardij.nl{href}"
-        # Skip nav/filter links, only property detail pages
-        if full_url.rstrip("/") == BASE_URL.rstrip("/"):
-            continue
-        if not re.search(r"disveldmakelaardij\.nl/(aanbod|woning)/[^/]+", full_url):
-            continue
-        if any(x in full_url for x in ["?", "#", "filter", "contact", "over", "dienst"]):
-            continue
-        if full_url not in seen:
-            seen.add(full_url)
-            property_urls.append(full_url)
 
-    log.info(f"Disveld: found {len(property_urls)} URLs, fetching details...")
+        # Must be a property path: /aanbod/slug/ (exactly 2 segments)
+        path = full_url.replace("https://disveldmakelaardij.nl", "").strip("/")
+        if not path.startswith("aanbod/") or path.count("/") != 1:
+            continue
+        if full_url in seen:
+            continue
+
+        # Check if this link or its parent contains a price — active listings have prices
+        parent = a.parent
+        context_text = ""
+        for _ in range(4):  # walk up 4 levels
+            if parent:
+                context_text = parent.get_text()
+                if "€" in context_text:
+                    break
+                parent = parent.parent
+
+        if "€" not in context_text:
+            continue  # no price nearby = likely a nav/footer link to sold property
+
+        seen.add(full_url)
+        property_urls.append(full_url)
+
+    log.info(f"Disveld: found {len(property_urls)} active property URLs, fetching details...")
 
     listings = []
     for url in property_urls:
