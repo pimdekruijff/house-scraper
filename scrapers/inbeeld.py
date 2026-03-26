@@ -5,7 +5,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
-BASE_URL = "https://driessenmakelaardij.nl/woningaanbod/"
+BASE_URL = "https://www.inbeeldmakelaardij.nl/woningaanbod"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept-Language": "nl-NL,nl;q=0.9",
@@ -30,14 +30,11 @@ def calc_price_per_m2(price: int, surface: int) -> str:
 
 async def fetch_detail(client: httpx.AsyncClient, url: str) -> dict:
     """
-    Fetch details from a Driessen detail page.
-    Uses .house-feature-label / .house-feature-value div pairs AND
-    Realworks <th>/<td> table rows — handles both.
-
-    Key labels:
-      Vraagprijs                              -> price
-      Gebruiksoppervlakte woonfunctie (m2)    -> surface
-      Energieklasse                           -> energy label
+    Fetch details from an In Beeld detail page.
+    Info is in .house-feature-label / .house-feature-value div pairs:
+      Gebruiksoppervlakte woonfunctie (m2) -> surface
+      Energieklasse                         -> energy
+    Price is in the page header or a separate element.
     """
     try:
         resp = await client.get(url, headers=HEADERS, timeout=15)
@@ -49,38 +46,28 @@ async def fetch_detail(client: httpx.AsyncClient, url: str) -> dict:
         surface_int = 0
         energy = "onbekend"
 
-        def process(label: str, value: str):
-            nonlocal price_text, surface_text, surface_int, energy
-            label = label.lower()
-            if any(w in label for w in ["vraagprijs", "koopsom"]):
-                price_text = value
-            elif "woonfunctie" in label or "woonoppervlakt" in label:
-                surface_int = parse_surface(value)
-                surface_text = f"{value} m²" if "m" not in value.lower() else value
-            elif "energieklasse" in label or ("energielabel" in label and "voorlopig" not in label):
-                energy = value
-            elif "voorlopig energielabel" in label and energy == "onbekend":
-                energy = value
-
-        # Method 1: div pairs (In Beeld / Driessen style)
+        # Parse label/value div pairs
         for wrapper in soup.select(".house-feature-wrapper"):
             label_el = wrapper.find(class_="house-feature-label")
             value_el = wrapper.find(class_="house-feature-value")
-            if label_el and value_el:
-                process(label_el.get_text(strip=True), value_el.get_text(strip=True))
+            if not label_el or not value_el:
+                continue
+            label = label_el.get_text(strip=True).lower()
+            value = value_el.get_text(strip=True)
 
-        # Method 2: Realworks table rows
-        for row in soup.select("tr.realworks-features-list__item"):
-            th = row.find("th")
-            td = row.find("td")
-            if th and td:
-                process(th.get_text(strip=True), td.get_text(strip=True))
+            if any(w in label for w in ["vraagprijs", "koopsom", "prijs"]):
+                price_text = value
+            elif "woonfunctie" in label or "woonoppervlakt" in label:
+                surface_int = parse_surface(value)
+                surface_text = f"{value} m²"
+            elif "energieklasse" in label or "energielabel" in label:
+                energy = value
 
-        # Fallback: find price anywhere on page
+        # Price may also be in a dedicated price element in the header
         if price_text == "onbekend":
             for el in soup.find_all(string=re.compile(r"€\s*[\d\.]+")):
                 t = el.strip()
-                if re.search(r"\d{3}", t):
+                if "€" in t and re.search(r"\d{3}", t):
                     price_text = t
                     break
 
@@ -95,12 +82,16 @@ async def fetch_detail(client: httpx.AsyncClient, url: str) -> dict:
             "price_per_m2": price_per_m2,
         }
     except Exception as e:
-        log.debug(f"Driessen detail fetch failed for {url}: {e}")
+        log.debug(f"In Beeld detail fetch failed for {url}: {e}")
         return {"price_text": "onbekend", "price_raw": 0, "surface": "onbekend",
                 "energy": "onbekend", "price_per_m2": "onbekend"}
 
 
-async def scrape_driessen() -> list[dict]:
+async def scrape_inbeeld() -> list[dict]:
+    """
+    Step 1: fetch listing page, collect all /woningaanbod/straat-nr-stad URLs.
+    Step 2: fetch each detail page concurrently.
+    """
     async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
         resp = await client.get(BASE_URL, headers=HEADERS)
         resp.raise_for_status()
@@ -108,23 +99,27 @@ async def scrape_driessen() -> list[dict]:
 
         seen = set()
         items = []
-        for a in soup.find_all("a", href=re.compile(r"/woning/")):
+        for a in soup.find_all("a", href=re.compile(r"/woningaanbod/[^/]+")):
             href = a["href"]
-            url = href if href.startswith("http") else f"https://driessenmakelaardij.nl{href}"
+            url = href if href.startswith("http") else f"https://www.inbeeldmakelaardij.nl{href}"
+            # Skip the listing page itself
+            if url.rstrip("/") == BASE_URL.rstrip("/"):
+                continue
             if url in seen:
                 continue
             seen.add(url)
 
-            # slug: wijchen-europaplein-11 -> Europaplein 11, Wijchen
+            # Extract address from slug: henk-van-tienhovenstraat-12-nijmegen
             slug = url.rstrip("/").split("/")[-1]
             parts = slug.split("-")
-            city = parts[0].title() if parts else ""
-            street = " ".join(parts[1:]).title() if len(parts) > 1 else slug.title()
+            # Last part is likely city, rest is street + number
+            city = parts[-1].title() if parts else ""
+            street = " ".join(parts[:-1]).title() if len(parts) > 1 else slug.title()
             address = f"{street}, {city}" if city else street
 
             items.append({"url": url, "address": address})
 
-        log.info(f"Driessen: found {len(items)} property URLs, fetching details...")
+        log.info(f"In Beeld: found {len(items)} property URLs, fetching details...")
 
         semaphore = asyncio.Semaphore(5)
 
@@ -140,7 +135,7 @@ async def scrape_driessen() -> list[dict]:
         if r["price_raw"] == 0:
             continue
         listings.append({
-            "source": "Driessen",
+            "source": "In Beeld",
             "title": r["address"],
             "price_raw": r["price_raw"],
             "price": r["price_text"],
@@ -150,5 +145,5 @@ async def scrape_driessen() -> list[dict]:
             "url": r["url"],
         })
 
-    log.info(f"Driessen: scraped {len(listings)} listings")
+    log.info(f"In Beeld: scraped {len(listings)} listings")
     return listings
