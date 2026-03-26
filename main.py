@@ -5,6 +5,7 @@ from scrapers.stmakelaars import scrape_stmakelaars
 from scrapers.kolmeijer import scrape_kolmeijer
 from scrapers.hestia import scrape_hestia
 from scrapers.verbeek import scrape_verbeek
+from scrapers.driessen import scrape_driessen
 from notifier import send_telegram
 from storage import load_seen, save_seen
 
@@ -33,6 +34,7 @@ async def run():
         scrape_kolmeijer,
         scrape_hestia,
         scrape_verbeek,
+        scrape_driessen,
     ]
 
     for scraper in scrapers:
