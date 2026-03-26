@@ -9,12 +9,15 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 
 async def send_telegram(listing: dict):
+    price_per_m2 = listing.get("price_per_m2", "onbekend")
+
     text = (
         f"🏠 *Nieuwe woning — {listing['source']}*\n"
         f"\n"
         f"📍 *Locatie:* {listing['title']}\n"
         f"💶 *Prijs:* {listing['price']}\n"
         f"📐 *Oppervlakte:* {listing['surface']}\n"
+        f"💰 *Prijs per m²:* {price_per_m2}\n"
         f"⚡ *Energielabel:* {listing['energy']}\n"
         f"\n"
         f"🔗 [Bekijk woning]({listing['url']})"

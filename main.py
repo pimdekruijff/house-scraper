@@ -3,6 +3,8 @@ import logging
 from scrapers.hansjanssen import scrape_hansjanssen
 from scrapers.stmakelaars import scrape_stmakelaars
 from scrapers.kolmeijer import scrape_kolmeijer
+from scrapers.hestia import scrape_hestia
+from scrapers.verbeek import scrape_verbeek
 from notifier import send_telegram
 from storage import load_seen, save_seen
 
@@ -11,7 +13,7 @@ log = logging.getLogger(__name__)
 
 PRICE_MIN = 200_000
 PRICE_MAX = 350_000
-LOCATION_KEYWORDS = ["nijmegen", "nymegen"]  # uitbreiden indien gewenst
+LOCATION_KEYWORDS = ["nijmegen", "nymegen"]
 
 
 def is_in_nijmegen(listing: dict) -> bool:
@@ -29,6 +31,8 @@ async def run():
         scrape_hansjanssen,
         scrape_stmakelaars,
         scrape_kolmeijer,
+        scrape_hestia,
+        scrape_verbeek,
     ]
 
     for scraper in scrapers:
@@ -40,12 +44,6 @@ async def run():
                 in_range = PRICE_MIN <= price <= PRICE_MAX
                 in_nijmegen = is_in_nijmegen(listing)
                 is_new = listing["url"] not in seen
-
-                log.debug(
-                    f"  {listing['title'][:50]} | "
-                    f"prijs={price} in_range={in_range} "
-                    f"nijmegen={in_nijmegen} nieuw={is_new}"
-                )
 
                 if in_range and in_nijmegen and is_new:
                     new_listings.append(listing)
