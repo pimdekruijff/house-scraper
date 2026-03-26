@@ -110,8 +110,8 @@ async def scrape_ooststede() -> list[dict]:
         )
         page = await context.new_page()
         try:
-            await page.goto(BASE_URL, wait_until="networkidle", timeout=40000)
-            await page.wait_for_timeout(3000)
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(2000)
             content = await page.content()
         except Exception as e:
             log.error(f"Ooststede listing page failed: {e}")

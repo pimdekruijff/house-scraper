@@ -28,55 +28,51 @@ def calc_price_per_m2(price: int, surface: int) -> str:
     return "onbekend"
 
 
-async def fetch_detail_playwright(url: str) -> dict:
+async def fetch_detail(page, url: str) -> dict:
     """
-    Beaufort loads kenmerken via JS — use Playwright to render the page.
-    Price: "€ 685.000,- k.k." near "Te Koop"
-    Surface + energy: in kenmerken section rendered after JS load.
+    Fetch a Beaufort detail page using an existing Playwright page object.
+    Reusing the page avoids the overhead of launching a new browser per property.
     """
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(user_agent=HEADERS["User-Agent"])
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(2000)
-            content = await page.content()
-            await browser.close()
-
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(1500)
+        content = await page.content()
         soup = BeautifulSoup(content, "html.parser")
 
         price_text = "onbekend"
         surface_text = "onbekend"
         surface_int = 0
         energy = "onbekend"
+        full_text = soup.get_text(" ")
 
-        # Price: standalone € amount on page
+        # Price: standalone € amount
         for el in soup.find_all(string=re.compile(r"€\s*[\d\.]+")):
             t = el.strip()
             if re.search(r"€\s*\d{3}", t) and ",-" in t:
                 price_text = t
                 break
 
-        # Scan all label/value pairs — Beaufort uses various CMS structures
-        full_text = soup.get_text(" ")
-
-        # Try structured kenmerken divs first
-        for wrapper in soup.select(".property-feature, .kenmerk, [class*='feature']"):
-            label_el = wrapper.find(class_=re.compile(r"label|title|key"))
-            value_el = wrapper.find(class_=re.compile(r"value|val"))
-            if not label_el or not value_el:
-                continue
-            label = label_el.get_text(strip=True).lower()
-            value = value_el.get_text(strip=True)
-            if "woonoppervlak" in label or "oppervlak" in label:
+        # Structured label/value pairs
+        def process(label: str, value: str):
+            nonlocal price_text, surface_text, surface_int, energy
+            label = label.lower()
+            if any(w in label for w in ["vraagprijs", "koopsom"]):
+                price_text = value
+            elif "woonoppervlak" in label or "oppervlak" in label:
                 surface_int = parse_surface(value)
                 surface_text = f"{value} m²" if "m" not in value.lower() else value
             elif "energielabel" in label or "energieklasse" in label:
                 energy = value
 
-        # Fallback: scan text for patterns
+        for wrapper in soup.select(".property-feature, .kenmerk, [class*='feature']"):
+            lbl = wrapper.find(class_=re.compile(r"label|title|key"))
+            val = wrapper.find(class_=re.compile(r"value|val"))
+            if lbl and val:
+                process(lbl.get_text(strip=True), val.get_text(strip=True))
+
+        # Fallback: scan full text
         if surface_text == "onbekend":
-            m = re.search(r"(\d+)\s*m²?\s*(woon|gebruiks|woonopp)", full_text, re.I)
+            m = re.search(r"(\d+)\s*m²?\s*(woon|gebruiks)", full_text, re.I)
             if not m:
                 m = re.search(r"[Ww]oon\w*\s+(\d+)\s*m", full_text)
             if m:
@@ -90,14 +86,8 @@ async def fetch_detail_playwright(url: str) -> dict:
 
         price_raw = parse_price(price_text)
         price_per_m2 = calc_price_per_m2(price_raw, surface_int)
-
-        return {
-            "price_text": price_text,
-            "price_raw": price_raw,
-            "surface": surface_text,
-            "energy": energy,
-            "price_per_m2": price_per_m2,
-        }
+        return {"price_text": price_text, "price_raw": price_raw,
+                "surface": surface_text, "energy": energy, "price_per_m2": price_per_m2}
     except Exception as e:
         log.debug(f"Beaufort detail fetch failed for {url}: {e}")
         return {"price_text": "onbekend", "price_raw": 0, "surface": "onbekend",
@@ -106,9 +96,10 @@ async def fetch_detail_playwright(url: str) -> dict:
 
 async def scrape_beaufort() -> list[dict]:
     """
-    Listing page: use httpx, collect /woning/stad-straat-nr/ links.
-    Detail pages: use Playwright (JS rendered).
+    Optimized: één browser, één page object hergebruikt voor alle detailpagina's.
+    Listing page via httpx, details via Playwright.
     """
+    # Step 1: get listing page with httpx
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
             resp = await client.get(BASE_URL, headers=HEADERS)
@@ -126,34 +117,36 @@ async def scrape_beaufort() -> list[dict]:
         if url in seen:
             continue
         seen.add(url)
-
-        # /woning/nijmegen-van-peltlaan-222/ -> Van Peltlaan 222, Nijmegen
         slug = url.rstrip("/").split("/")[-1]
-        # First word is city
         parts = slug.split("-")
         city = parts[0].title()
         street = " ".join(parts[1:]).title()
-        address = f"{street}, {city}"
-
-        items.append({"url": url, "address": address})
+        items.append({"url": url, "address": f"{street}, {city}"})
 
     log.info(f"Beaufort: found {len(items)} property URLs, fetching details...")
 
+    # Step 2: reuse ONE browser + ONE page for all detail fetches
     listings = []
-    for item in items:
-        detail = await fetch_detail_playwright(item["url"])
-        if detail["price_raw"] == 0:
-            continue
-        listings.append({
-            "source": "Beaufort",
-            "title": item["address"],
-            "price_raw": detail["price_raw"],
-            "price": detail["price_text"],
-            "surface": detail["surface"],
-            "energy": detail["energy"],
-            "price_per_m2": detail["price_per_m2"],
-            "url": item["url"],
-        })
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(user_agent=HEADERS["User-Agent"])
+
+        for item in items:
+            detail = await fetch_detail(page, item["url"])
+            if detail["price_raw"] == 0:
+                continue
+            listings.append({
+                "source": "Beaufort",
+                "title": item["address"],
+                "price_raw": detail["price_raw"],
+                "price": detail["price_text"],
+                "surface": detail["surface"],
+                "energy": detail["energy"],
+                "price_per_m2": detail["price_per_m2"],
+                "url": item["url"],
+            })
+
+        await browser.close()
 
     log.info(f"Beaufort: scraped {len(listings)} listings")
     return listings
