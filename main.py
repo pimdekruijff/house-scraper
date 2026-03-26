@@ -27,6 +27,31 @@ PRICE_MIN = 200_000
 PRICE_MAX = 350_000
 LOCATION_KEYWORDS = ["nijmegen", "nymegen"]
 
+# Scrapers die Playwright gebruiken (browser overhead) — apart groeperen
+PLAYWRIGHT_SCRAPERS = [
+    scrape_kolmeijer,
+    scrape_stmakelaars,
+    scrape_verbeek,
+    scrape_beaufort,
+    scrape_level2,
+    scrape_robdisbergen,
+    scrape_disveld,
+    scrape_rotsvast,
+    scrape_ooststede,
+]
+
+# Scrapers die alleen httpx gebruiken (lichtgewicht, volledig parallel)
+HTTPX_SCRAPERS = [
+    scrape_hansjanssen,
+    scrape_hestia,
+    scrape_driessen,
+    scrape_inbeeld,
+    scrape_pulles,
+    scrape_homan,
+    scrape_hermsen,
+    scrape_nmg,
+]
+
 
 def is_in_nijmegen(listing: dict) -> bool:
     title = listing.get("title", "").lower()
@@ -34,46 +59,44 @@ def is_in_nijmegen(listing: dict) -> bool:
     return any(kw in title or kw in url for kw in LOCATION_KEYWORDS)
 
 
+async def run_scraper(scraper) -> list[dict]:
+    """Run a single scraper, catch errors gracefully."""
+    try:
+        results = await scraper()
+        log.info(f"{scraper.__name__}: found {len(results)} listings")
+        return results
+    except Exception as e:
+        log.error(f"{scraper.__name__} failed: {e}")
+        return []
+
+
 async def run():
     log.info("Starting house scrape run...")
     seen = load_seen()
+
+    # Run httpx scrapers fully in parallel
+    # Run Playwright scrapers with max 3 concurrent (each launches Chromium)
+    playwright_semaphore = asyncio.Semaphore(3)
+
+    async def run_playwright(scraper):
+        async with playwright_semaphore:
+            return await run_scraper(scraper)
+
+    httpx_tasks = [run_scraper(s) for s in HTTPX_SCRAPERS]
+    playwright_tasks = [run_playwright(s) for s in PLAYWRIGHT_SCRAPERS]
+
+    all_results = await asyncio.gather(*httpx_tasks, *playwright_tasks)
+
+    # Filter and collect new listings
     new_listings = []
-
-    scrapers = [
-        scrape_hansjanssen,
-        scrape_stmakelaars,
-        scrape_kolmeijer,
-        scrape_hestia,
-        scrape_verbeek,
-        scrape_driessen,
-        scrape_inbeeld,
-        scrape_pulles,
-        scrape_homan,
-        scrape_beaufort,
-        scrape_level2,
-        scrape_hermsen,
-        scrape_nmg,
-        scrape_robdisbergen,
-        scrape_disveld,
-        scrape_rotsvast,
-        scrape_ooststede,
-    ]
-
-    for scraper in scrapers:
-        try:
-            listings = await scraper()
-            log.info(f"{scraper.__name__}: found {len(listings)} listings")
-            for listing in listings:
-                price = listing.get("price_raw", 0)
-                in_range = PRICE_MIN <= price <= PRICE_MAX
-                in_nijmegen = is_in_nijmegen(listing)
-                is_new = listing["url"] not in seen
-
-                if in_range and in_nijmegen and is_new:
-                    new_listings.append(listing)
-                    seen.add(listing["url"])
-        except Exception as e:
-            log.error(f"{scraper.__name__} failed: {e}")
+    for listings in all_results:
+        for listing in listings:
+            price = listing.get("price_raw", 0)
+            if (PRICE_MIN <= price <= PRICE_MAX
+                    and is_in_nijmegen(listing)
+                    and listing["url"] not in seen):
+                new_listings.append(listing)
+                seen.add(listing["url"])
 
     if new_listings:
         log.info(f"Sending {len(new_listings)} new listings via Telegram")
